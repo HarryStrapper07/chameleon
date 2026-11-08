@@ -1,37 +1,3 @@
-Claude
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Readme · MD
 🦎 Chameleon — Open Redirect Vulnerability Scanner
 Chameleon is a fast, multi-threaded Python tool for discovering Open Redirect vulnerabilities. Give it a URL list, or just a bare domain and let it auto-recon (Wayback Machine + live crawl) on its own.
 
