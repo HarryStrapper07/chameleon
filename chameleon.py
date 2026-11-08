@@ -303,12 +303,68 @@ def build_payload_urls(url, attacker_domain, all_params=False):
             yield test_url, pname, payload
 
 
-def is_vulnerable(location_header, attacker_domain):
-    if not location_header:
+def is_vulnerable(location_value, attacker_domain):
+    """
+    STRICT check: parses the redirect target as a URL and compares its
+    actual HOST to the attacker domain - exact match or a real
+    subdomain of it. This avoids false positives from substring
+    matching, e.g. a Location of 'https://myevil.com.hack.net/x'
+    contains the substring 'evil.com' but does NOT actually redirect
+    to our attacker domain - the old substring check would have
+    wrongly flagged this as vulnerable.
+    """
+    if not location_value:
         return False
-    loc = location_header.lower()
-    domain = attacker_domain.lower()
-    return domain in loc
+
+    attacker = attacker_domain.lower().strip().rstrip("/")
+
+    try:
+        parsed = urlparse(location_value.strip())
+    except Exception:
+        return False
+
+    netloc = parsed.netloc
+    if not netloc:
+        # No netloc at all -> it's a relative path (e.g. "/dashboard"),
+        # not a redirect to an external attacker-controlled host.
+        return False
+
+    # Strip any userinfo (user:pass@host) and port, keep just the host
+    host = netloc.split("@")[-1].split(":")[0].lower()
+
+    if not host:
+        return False
+
+    return host == attacker or host.endswith("." + attacker)
+
+
+BODY_REDIRECT_PATTERNS = [
+    # <meta http-equiv="refresh" content="0;url=https://evil.com">
+    r'<meta[^>]+http-equiv=["\']refresh["\'][^>]*content=["\'][^"\']*url\s*=\s*([^"\'>\s]+)',
+    # window.location = "..."  /  location.href = "..."
+    r'(?:window\.)?location(?:\.href)?\s*=\s*["\']([^"\']+)["\']',
+    # location.replace("...")
+    r'location\.replace\(\s*["\']([^"\']+)["\']\s*\)',
+    # location.assign("...")
+    r'location\.assign\(\s*["\']([^"\']+)["\']\s*\)',
+]
+
+
+def find_body_redirect(html, attacker_domain):
+    """
+    Looks for ACTUAL redirect statements (meta refresh / JS location
+    assignment) in the response body, and only returns a match if the
+    target host genuinely resolves to the attacker domain (via the
+    same strict is_vulnerable() host check). This replaces a naive
+    'is the domain string anywhere in the page' check, which produced
+    false positives on pages that merely mention/reflect the domain
+    without actually redirecting to it.
+    """
+    for pattern in BODY_REDIRECT_PATTERNS:
+        for match in re.findall(pattern, html, re.IGNORECASE):
+            if is_vulnerable(match, attacker_domain):
+                return match
+    return None
 
 
 def check_url(test_url, param, payload, attacker_domain, timeout):
@@ -328,13 +384,19 @@ def check_url(test_url, param, payload, attacker_domain, timeout):
                 "status": resp.status_code, "location": location, "vulnerable": True
             }
 
-        # Case 2: some apps redirect via JS/meta refresh -> do a soft check
-        if attacker_domain.lower() in resp.text.lower()[:2000] and resp.status_code == 200:
-            return {
-                "url": test_url, "param": param, "payload": payload,
-                "status": resp.status_code, "location": "(found in body - possible meta/JS redirect)",
-                "vulnerable": True
-            }
+        # Case 2: some apps redirect via JS/meta refresh instead of a
+        # Location header. We only flag this if an actual redirect
+        # statement is found AND its target host genuinely matches
+        # the attacker domain (strict check, no loose substring match).
+        if resp.status_code == 200:
+            body_match = find_body_redirect(resp.text[:5000], attacker_domain)
+            if body_match:
+                return {
+                    "url": test_url, "param": param, "payload": payload,
+                    "status": resp.status_code,
+                    "location": f"(body redirect found: {body_match})",
+                    "vulnerable": True
+                }
 
         return {
             "url": test_url, "param": param, "payload": payload,
